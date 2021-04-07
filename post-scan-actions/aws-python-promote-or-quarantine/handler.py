@@ -3,8 +3,11 @@ import re
 import json
 import time
 import urllib.parse
-
 import boto3
+from botocore.exceptions import ClientError
+
+s3_client = boto3.client('s3')
+fss_tag_prefix = 'fss-original-'
 
 valid_acl = {
     'private',
@@ -66,6 +69,33 @@ def delete_objects(bucket, prefix, objects):
     objects = {'Objects': [{'Key': prefix + o} for o in objects]}
     s3.delete_objects(Bucket=bucket, Delete=objects)
 
+def get_existing_tag_set(bucket_name, object_name):
+    try:
+        response = s3_client.get_object_tagging(Bucket=bucket_name, Key=object_name)
+        return list(filter(lambda tag: not tag['Key'].startswith(fss_tag_prefix), response['TagSet']))
+    except ClientError as ex:
+        print('failed to get existing tags: ' + str(ex))
+        return None
+        
+def tag_object(src_bucket_name, bucket_name, object_name, tag):
+    existing_tag_set = get_existing_tag_set(src_bucket_name, object_name)
+    if existing_tag_set:
+        tag['TagSet'].extend(existing_tag_set)
+    print(json.dumps(tag['TagSet']))
+    try:
+        s3_client.put_object_tagging(
+            Bucket=bucket_name, Key=object_name, Tagging=tag)
+        print('the object has been tagged with original bucket and path')
+    except ClientError as e:
+        print('failed to tag object: ' + str(e))
+
+def make_tags(tags):
+    tag_list = []
+    for k, v in tags.items():
+        tag_list.append({'Key': k,
+                         'Value': v if v is not None else ''})
+    return {'TagSet': tag_list}
+    
 def lambda_handler(event, context):
     acl = os.environ.get('ACL')
 
@@ -101,7 +131,12 @@ def lambda_handler(event, context):
             dest_key=object_key,
             acl=acl,
         )
-
+        
+        tag_object(src_bucket, dst_bucket, object_key, make_tags(
+            { f'{fss_tag_prefix}Bucket': src_bucket,
+              f'{fss_tag_prefix}Path': object_key
+            }) )
+            
         if mode == 'move':
             delete_objects(bucket=src_bucket, prefix='', objects=[object_key])
 
